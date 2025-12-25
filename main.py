@@ -342,105 +342,164 @@ elif current_step == 3:
         st.rerun()
 
 # ==========================================
-# STEP 4: 结果展示 (高性能抗压版)
+# STEP 4: 结果展示 (Tab分层 + 行业薪资透视)
 # ==========================================
 elif current_step == 4:
     st.balloons()
-    st.subheader("🎯 您的专属岗位推荐表")
 
+    # --- 数据加载 ---
     file_obj = st.session_state.get('uploaded_file')
     df = load_data(file_obj)
 
     if df is None or df.empty:
         st.warning("⚠️ 未检测到上传文件，请在侧边栏重新上传 CSV 文件。")
         st.stop()
-    else:
-        recommender = JobRecommender(df)
-        results = recommender.calculate_scores(st.session_state.user_data, st.session_state.weights)
 
-        # 筛选所有 80 分以上的岗位
-        top_jobs = results[results['综合得分'] >= 80].sort_values(by='综合得分', ascending=False)
+    recommender = JobRecommender(df)
+    results = recommender.calculate_scores(st.session_state.user_data, st.session_state.weights)
 
-        if top_jobs.empty:
-            st.warning("⚠️ 根据您的严格筛选（特别是学历限制），暂无 60 分以上岗位。以下为您展示得分最高的 Top 10 备选：")
-            top_jobs = results.head(10)
+    # 筛选逻辑
+    high_score_jobs = results[results['综合得分'] >= 80]
+    top_jobs = high_score_jobs if not high_score_jobs.empty else results.head(20)
+    top_jobs = top_jobs.sort_values(by='综合得分', ascending=False)
 
-    if not results.empty:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("为您筛选岗位", f"{len(top_jobs)} 个")
-        col2.metric("最高匹配度", f"{top_jobs.iloc[0]['综合得分']:.1f} 分")
 
-        dist = st.session_state.user_data.get('district', '')
-        if dist:
-            match_count = len(top_jobs[top_jobs['工作地区'].str.contains(dist)])
-            col3.metric(f"符合'{dist}'区域", f"{match_count} 个")
-        else:
-            col3.metric("首选城市占比", f"{len(top_jobs[top_jobs['S_城市'] >= 100]) / len(top_jobs) * 100:.0f}%")
+    # --- 0. 智能地址清洗逻辑 ---
+    def smart_location_name(loc_str):
+        loc_str = str(loc_str).replace("广东省", "")
+        user_cities = st.session_state.user_data.get('preferred_cities', [])
+        for city in user_cities:
+            if city in loc_str:
+                loc_str = loc_str.replace(city, "")
+        return loc_str if loc_str.strip() else "市辖区/全城"
 
-        st.markdown(f"### 🏆 推荐清单详情 (共 {len(top_jobs)} 条)")
 
-        desired_cols = [
-            '综合得分', '推荐理由',
-            '职位名称', '单位名称', '薪资文本', '工作地区',
-            '学历要求', '经验要求', '行业',
-            '住宿情况', '用工性质', '单位规模',
-            '薪资下限', '薪资上限',
-            '发布时间', '来源类型', '职位来源', '岗位ID'
-        ]
-        final_cols = [c for c in desired_cols if c in top_jobs.columns]
+    top_jobs['显示区域'] = top_jobs['工作地区'].apply(smart_location_name)
 
-        # 智能渲染
-        total_cells = top_jobs[final_cols].shape[0] * len(final_cols)
-        display_df = top_jobs[final_cols].copy()
-        if '岗位ID' in display_df.columns:
-            display_df['岗位ID'] = display_df['岗位ID'].astype(str)
+    # --- 1. 宏观统计看板 (始终显示) ---
+    st.subheader("📊 岗位透视驾驶舱")
 
-        if total_cells > 200000:
-            st.info(f"⚡ 数据量较大 ({total_cells} 格)，已切换为高性能模式。")
-            st.dataframe(display_df, use_container_width=True, height=600)
-        else:
-            st.dataframe(
-                display_df.style
-                .format({'综合得分': "{:.1f}", '薪资下限': "{:.0f}", '薪资上限': "{:.0f}"}, na_rep="-")
-                .background_gradient(subset=['综合得分'], cmap="Oranges"),
-                use_container_width=True,
-                height=600
-            )
+    avg_salary = top_jobs['平均薪资'].mean()
+    top_area_count = top_jobs['显示区域'].value_counts()
+    top_area_name = top_area_count.idxmax()
+    top_industry_count = top_jobs['行业'].value_counts()
+    top_industry_name = top_industry_count.idxmax() if not top_industry_count.empty else "通用"
 
-        st.markdown("---")
-        st.markdown("### 📊 岗位多维透视 (Top 20)")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("精选岗位数", f"{len(top_jobs)} 个", "综合评分Top序列")
+    m2.metric("平均月薪", f"{avg_salary / 1000:.1f} k", help="基于筛选出的岗位平均值")
+    m3.metric("热点区域", top_area_name, f"该区占比 {top_area_count.max() / len(top_jobs):.0%}")
+    m4.metric("核心行业", top_industry_name, "占比最高的主流行业")
 
-        plot_df = top_jobs.head(20).copy()
-        fig_scatter = go.Figure()
-        plot_df['城市简写'] = plot_df['工作地区'].apply(lambda x: str(x)[:2])
+    st.markdown("---")
 
-        for city in plot_df['城市简写'].unique():
-            city_df = plot_df[plot_df['城市简写'] == city]
-            fig_scatter.add_trace(go.Scatter(
-                x=city_df['平均薪资'], y=city_df['综合得分'], mode='markers', name=city,
-                text=city_df['职位名称'] + '<br>' + city_df['单位名称'],
-                hovertemplate='<b>%{text}</b><br>薪资: %{x}元<br>得分: %{y:.1f}分',
-                marker=dict(size=12, opacity=0.8)
-            ))
-        fig_scatter.update_layout(title="Top 20 岗位：薪资 vs 匹配度", xaxis_title="平均月薪", yaxis_title="综合得分",
-                                  height=400, template="plotly_white")
+    # --- 2. Tab 分层视图 ---
+    tab_charts, tab_list = st.tabs(["📈 全局透视分析 (决策辅助)", "📋 详细岗位列表 (投递清单)"])
 
-        best_job = plot_df.iloc[0]
-        categories = ['学历', '经验', '专业', '薪资', '城市', '潜力', '稳定']
-        values = [best_job.get(f'S_{k}', 0) for k in ['学历', '经验', '专业', '薪资', '城市', '潜力', '稳定']]
-
-        fig_radar = go.Figure(data=go.Scatterpolar(r=values, theta=categories, fill='toself', name='Top 1'))
-        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 120])), title=f"🏆 冠军岗位能力模型",
-                                height=400, template="plotly_white")
-
+    # === TAB 1: 图表分析 ===
+    with tab_charts:
+        # 第一行：区域分布 & 薪资分布
         c1, c2 = st.columns(2)
-        c1.plotly_chart(fig_scatter, use_container_width=True)
-        c2.plotly_chart(fig_radar, use_container_width=True)
+
+        with c1:
+            st.markdown("##### 📍 机会都在哪里？ (区域分布)")
+            area_df = top_jobs['显示区域'].value_counts().head(8).sort_values(ascending=True)
+            fig_area = go.Figure(go.Bar(
+                y=area_df.index, x=area_df.values, orientation='h',
+                text=area_df.values, textposition='auto', marker_color='#4F81BD'
+            ))
+            fig_area.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=250, xaxis_title="岗位数量",
+                                   template="plotly_white")
+            st.plotly_chart(fig_area, use_container_width=True)
+
+        with c2:
+            st.markdown("##### 💰 整体薪资段位分布")
+            salary_bins = [0, 5000, 8000, 12000, 20000, 100000]
+            salary_labels = ['5k以下', '5k-8k', '8k-12k', '12k-20k', '20k以上']
+            top_jobs['薪资段'] = pd.cut(top_jobs['平均薪资'], bins=salary_bins, labels=salary_labels)
+            sal_counts = top_jobs['薪资段'].value_counts().sort_index()
+
+            fig_sal = go.Figure(go.Bar(
+                x=sal_counts.index, y=sal_counts.values,
+                text=sal_counts.values, textposition='auto', marker_color='#C0504D'
+            ))
+            fig_sal.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=250, yaxis_title="岗位数量",
+                                  template="plotly_white")
+            st.plotly_chart(fig_sal, use_container_width=True)
 
         st.divider()
-        col_dl, col_reset = st.columns([1, 1])
-        csv = top_jobs.to_csv(index=False).encode('utf-8-sig')
-        col_dl.download_button("📥 导出完整结果 (CSV)", csv, '推荐结果.csv', 'text/csv', type="primary")
-        if col_reset.button("🔄 重新开始测评"):
-            st.session_state.step = 1
-            st.rerun()
+
+        # 第二行：行业占比 & 行业平均薪资
+        c3, c4 = st.columns(2)
+
+        with c3:
+            st.markdown("##### 🏭 都是哪些行业的岗位？ (Top 8)")
+            # 行业饼图
+            ind_counts = top_jobs['行业'].value_counts().head(8)
+            fig_pie = go.Figure(data=[go.Pie(
+                labels=ind_counts.index, values=ind_counts.values, hole=.4, textinfo='label+percent'
+            )])
+            fig_pie.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=300, showlegend=True)
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+        with c4:
+            st.markdown("##### 💵 各行业平均薪资对比 (Top 8)")
+            # 计算各行业平均薪资
+            ind_salary = top_jobs.groupby('行业')['平均薪资'].mean().sort_values(ascending=True).tail(8)
+
+            fig_ind_sal = go.Figure(go.Bar(
+                y=ind_salary.index, x=ind_salary.values, orientation='h',
+                text=[f"{v / 1000:.1f}k" for v in ind_salary.values], textposition='auto',
+                marker_color='#9BBB59'
+            ))
+            fig_ind_sal.update_layout(
+                margin=dict(l=0, r=0, t=0, b=0), height=300,
+                xaxis_title="平均月薪 (元)", template="plotly_white"
+            )
+            st.plotly_chart(fig_ind_sal, use_container_width=True)
+
+    # === TAB 2: 详细列表 ===
+    with tab_list:
+        st.markdown(f"### 📋 推荐清单详情 (共 {len(top_jobs)} 条)")
+
+        full_columns = [
+            '综合得分', '推荐理由', '职位名称', '单位名称', '薪资文本', '工作地区',
+            '学历要求', '经验要求', '行业', '单位性质', '单位规模', '用工性质',
+            '薪资下限', '薪资上限', '住宿情况', '发布时间', '来源类型', '职位来源', '岗位ID'
+        ]
+        valid_cols = [c for c in full_columns if c in top_jobs.columns]
+        display_df = top_jobs[valid_cols].copy()
+
+        if '岗位ID' in display_df.columns:
+            display_df['岗位ID'] = display_df['岗位ID'].astype(str).str.replace('.0', '', regex=False)
+
+        st.dataframe(
+            display_df.style
+            .format({'综合得分': "{:.1f}", '薪资下限': "{:.0f}", '薪资上限': "{:.0f}"}, na_rep="-")
+            .background_gradient(subset=['综合得分'], cmap="Oranges")
+            .highlight_null(color='#f0f2f6'),
+            use_container_width=True,
+            height=800,
+            column_config={
+                "岗位ID": st.column_config.TextColumn("岗位ID", help="唯一编号"),
+                "薪资文本": st.column_config.TextColumn("原薪资", width="medium"),
+                "单位名称": st.column_config.TextColumn("单位", width="medium"),
+            }
+        )
+
+    # --- 底部操作区 ---
+    st.divider()
+    col_dl, col_reset = st.columns([1, 4])
+
+    csv = top_jobs.to_csv(index=False).encode('utf-8-sig')
+    col_dl.download_button(
+        label="📥 下载完整数据 (Excel/CSV)",
+        data=csv,
+        file_name='岗位推荐结果_全字段.csv',
+        mime='text/csv',
+        type="primary"
+    )
+
+    if col_reset.button("🔄 重新开始测评"):
+        st.session_state.step = 1
+        st.rerun()
